@@ -12,6 +12,26 @@ class APIError(Exception):
     pass
 
 
+def retry_login(func, *args, **kwargs):
+    """Retry login if an operation fails out.
+
+    Implemented as a decorator that is assumed to be implemented on
+    top of an instance method.
+    """
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except requests.exceptions.RequestException as ex:
+            # if we have a failed token, try a second time
+            log.warn(
+                "Call to %s failed, attempting to log in and try again: %s"
+                % (func, ex))
+            obj = args[0]
+            obj._login(obj.version)
+            return func(*args, **kwargs)
+    return wrapper
+
+
 class Controller(object):
 
     """Interact with a UniFi controller.
@@ -65,6 +85,7 @@ class Controller(object):
         self.session.verify = ssl_verify
 
         log.debug('Controller for %s', self.url)
+        self.version = version
         self._login(version)
 
     def _jsondec(self, data):
@@ -86,33 +107,14 @@ class Controller(object):
                       "raise error to _read function")
             raise
 
+    @retry_login
     def _read(self, url, params=None):
         # Try block to handle the unifi server being offline.
-        while(True):
-            try:
-                r = self.session.get(url, params=params)
-            except requests.exceptions.ConnectionError as err:
-                log.error(str(err))
-                log.debug("Server likely not running")
-                self._login(self.version)
-                r = self.session.get(url, params=params)
-            else:
-                break
-
-        while(True):
-            try:
-                return self._jsondec(r.text)
-            except (RuntimeError, TypeError) as err:
-                log.error(str(err) +
-                          " -- will reattempt login after 5 seconds")
-                sleep(5)
-                self._login(self.version)
-                r = self.session.get(url, params=params)
-                return self._jsondec(r.text)
-            except Exception as err:
-                log.error(str(err))
-            else:
-                break
+        r = self.session.get(url, params=params)
+        try:
+            return self._jsondec(r.text)
+        except Exception as err:
+            log.error(str(err))
 
     def _write(self, url, json=None):
         r = self.session.post(url, json=json)
